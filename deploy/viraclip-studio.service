@@ -1,0 +1,30 @@
+[Unit]
+Description=ViraClip Creator Studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=harnet
+Group=harnet
+WorkingDirectory=/home/harnet/viraclip-studio/app
+Environment=HOST=127.0.0.1
+Environment=PORT=8022
+Environment=VIRACLIP_DATA=/home/harnet/viraclip-studio/data
+Environment=WHISPER_MODEL=base
+ExecStart=/home/harnet/viraclip-studio/.venv/bin/python /home/harnet/viraclip-studio/app/server.py
+Restart=on-failure
+RestartSec=4
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/harnet/viraclip-studio/data /home/harnet/.cache
+UMask=0077
+MemoryMax=2G
+CPUQuota=160%
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
