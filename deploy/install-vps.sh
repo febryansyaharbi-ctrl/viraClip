@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Run as harnet from an authorized SSH session. Never place passwords in this file.
 set -euo pipefail
+# Use regular HTTPS downloads; the optional Xet transport can stall on some VPS routes.
+export HF_HUB_DISABLE_XET=1
+export HF_HUB_DOWNLOAD_TIMEOUT=60
 base_dir=/home/harnet/viraclip-studio
 app_dir="$base_dir/app"
 repo_url=https://github.com/febryansyaharbi-ctrl/viraClip.git

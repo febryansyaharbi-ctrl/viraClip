@@ -1,2 +1,4 @@
 # Optional local speech recognition. Core app uses Python standard library.
 faster-whisper==1.2.1
+# Pin compatible PyAV API: later releases remove metadata_errors used by 1.2.1.
+av==15.1.0

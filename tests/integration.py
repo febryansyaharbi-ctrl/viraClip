@@ -44,6 +44,20 @@ class Integration(unittest.TestCase):
   with self.assertRaises(urllib.error.HTTPError) as ctx:self.call('/api/state',{'key':'profile','value':{}},headers={'Origin':'https://evil.example'})
   self.assertEqual(ctx.exception.code,403)
   with self.assertRaises(urllib.error.HTTPError):self.call('/api/state',{'key':'credentials','value':{}})
+  if os.environ.get('VIRACLIP_TEST_TRANSCRIPTION')=='1':
+   audio=pathlib.Path(self.temp.name)/'speech.wav'
+   subprocess.run(['ffmpeg','-v','error','-y','-f','lavfi','-i',"flite=text='This is a test of the video studio. We create useful lessons and explain every step.':voice=slt",str(audio)],check=True)
+   voice=self.call('/api/upload',raw=audio.read_bytes(),headers={'X-Filename':'speech.wav'})
+   jid=self.call('/api/transcribe',{'media':voice['id'],'language':'en'})['job']
+   for _ in range(180):
+    transcript=self.call('/api/jobs/'+jid)
+    if transcript['status'] in ['done','error']:break
+    time.sleep(.5)
+   self.assertEqual(transcript['status'],'done',transcript)
+   recognized=' '.join(s['text'] for s in transcript['result']['segments']).lower()
+   self.assertIn('test',recognized)
+   print('Speech recognized:',recognized)
+   self.call('/api/delete-media',{'id':voice['id']})
   self.call('/api/password',{'current':'test-password-only','password':'changed-password-test'})
   self.assertFalse(self.call('/api/session')['authenticated'])
   self.call('/api/login',{'password':'changed-password-test'})

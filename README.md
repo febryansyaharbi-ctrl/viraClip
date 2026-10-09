@@ -36,9 +36,9 @@ On first start a random owner password is created in `data/initial-password.txt`
 
 ## Deployment
 
-Deployment is prepared but not yet verified on the VPS. The last deployment connection was blocked because the authorized Desktop Commander device was offline.
+Deployed on the authorized VPS at https://harnet.tail89c9ef.ts.net:10000/ . The service is enabled for startup and is isolated from the existing services. No login secrets are stored in this repository.
 
-The supplied service definition runs as the unprivileged owner, has a 2 GB memory ceiling, CPU limit, and private temporary directory. Existing services are left in place. The intended HTTPS route uses the VPS's existing Tailscale Funnel service on its independent port 10000. Funnel is an external availability dependency.
+The supplied service definition runs as the unprivileged owner, has a 2 GB memory ceiling, CPU limit, and private temporary directory. Existing services are left in place. HTTPS uses the VPS's existing Tailscale Funnel service on its independent port 10000. Funnel is an external availability dependency.
 
 ```sh
 # From this repository, as harnet on the target VPS:
@@ -55,6 +55,16 @@ Back up the data directory using SQLite's backup API while running, or stop the 
 python3 tests/integration.py
 node --check public/app.js
 node tests/frontend.cjs
+# On the VPS with the base model cached and FFmpeg flite enabled:
+VIRACLIP_TEST_TRANSCRIPTION=1 .venv/bin/python tests/integration.py
 ```
 
 The integration test uses isolated temporary storage and a synthetic media fixture. It covers authentication, CSRF, durable state, upload, SRT, real MP4 encoding, validation, session revocation, and deletion. It does not call YouTube or a paid AI API.
+
+## Verification record — 2026-10-10 (Asia/Jakarta)
+
+- Public HTTPS health endpoint and login page verified.
+- Isolated integration workflow passed on the VPS: authentication, state, upload, subtitle import, actual 720×1280 MP4 render, access checks, password/session revocation, cleanup.
+- Optional speech test passed: generated English speech was transcribed and contained the expected words. This verifies the pipeline, not accuracy for every language, recording, or speaker.
+- Twenty empty/populated page-render checks passed, along with URL/text escaping and analytics calculation checks. Authenticated browser visual QA has not been completed.
+- Pinned PyAV 15.1.0 to resolve an incompatible `metadata_errors` API in newer releases. Regular HTTPS model downloading avoids a stalled optional Xet transport on this VPS.
