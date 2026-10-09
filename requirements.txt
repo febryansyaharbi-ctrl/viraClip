@@ -2,3 +2,6 @@
 faster-whisper==1.2.1
 # Pin compatible PyAV API: later releases remove metadata_errors used by 1.2.1.
 av==15.1.0
+
+youtube-transcript-api==1.2.4
+yt-dlp==2026.8.19

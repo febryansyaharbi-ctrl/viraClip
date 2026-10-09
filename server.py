@@ -5,6 +5,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from urllib.parse import urlsplit,unquote,parse_qs
 from http.cookies import SimpleCookie
+import intelligence
 
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.environ.get('VIRACLIP_DATA',str(ROOT/'data'))).resolve()
@@ -94,6 +95,7 @@ def suggestions(segments,duration):
 def transcribe(jid,p):
  global MODEL
  r=media_row(p['media']);
+ if r['ext']=='.youtube':raise ValueError('Proyek tautan hanya menggunakan caption YouTube.')
  if not r['audio']:raise ValueError('Video ini tidak memiliki audio.')
  try:from faster_whisper import WhisperModel
  except ImportError:raise ValueError('Mesin transkripsi belum terpasang. Anda tetap dapat mengimpor subtitle SRT.')
@@ -156,12 +158,72 @@ def render(jid,p):
  result={'video':'/media/exports/'+jid+'.mp4','subtitle':'/media/exports/'+jid+'.srt','name':p.get('name','Klip baru'),'duration':duration,'created':time.time()}
  jset('export:'+jid,result);update_job(jid,'done',100,'Video siap diunduh.',result)
 
+def youtube_import(jid,p):
+ vid=intelligence.youtube_id(p['url']);mid=hashlib.sha256(('youtube:'+vid).encode()).hexdigest()[:24]
+ update_job(jid,progress=10,message='Mengambil caption yang sudah tersedia di YouTube…')
+ result=intelligence.fetch_captions(vid,p.get('language','id'));duration=max(x['end'] for x in result['segments'])
+ with db() as c:
+  c.execute('INSERT OR IGNORE INTO media VALUES (?,?,?,?,?,?,?,?)',(mid,'YouTube · '+vid,'.youtube',duration,1280,720,1,time.time()))
+ jset('youtube:'+mid,{'video_id':vid,'url':'https://www.youtube.com/watch?v='+vid})
+ jset('transcript:'+mid,result)
+ update_job(jid,'done',100,'Caption YouTube siap. Jalankan analisis AI untuk menemukan poin bernilai.',{'media':mid})
+
+def analyze_transcript(jid,p):
+ r=media_row(p['media']);transcript=jget('transcript:'+r['id'],{'segments':[]})
+ result=intelligence.analyze(DATA,transcript,lambda n:update_job(jid,progress=n,message='AI membaca transkrip dan memeriksa rentang klip…'))
+ transcript.update(result);jset('transcript:'+r['id'],transcript)
+ update_job(jid,'done',100,'Analisis selesai. '+str(len(result['candidates']))+' kandidat ditemukan.',{'media':r['id']})
+
+def coach_reply(jid,p):
+ update_job(jid,progress=15,message='Coach membaca profil, misi, dan hasil channel Anda…')
+ context={key:jget(key,{} if key in ['profile','tasks','monetization','coachTasks'] else []) for key in ['profile','tasks','monetization','metrics','calendar','coachMissions','coachTasks']}
+ history=jget('coachHistory',[]);research=json.loads((ROOT/'public/research.json').read_text())
+ result,meta=intelligence.coach(DATA,context,p['message'],history,research)
+ now=time.time();history.extend([{'role':'user','text':p['message'],'created':now},{'role':'assistant','text':result['reply'],'created':now,'meta':meta}]);jset('coachHistory',history[-80:])
+ if result['niches']:jset('coachNiches',result['niches'])
+ missions=jget('coachMissions',[]);titles={m['title'].lower() for m in missions}
+ for m in result['missions']:
+  if m['title'].lower() not in titles:
+   m.update(id=secrets.token_hex(8),created=now);missions.append(m);titles.add(m['title'].lower())
+ jset('coachMissions',missions[-80:]);jset('coachLast',{'meta':meta,'created':now})
+ update_job(jid,'done',100,'Coach sudah menjawab. Buka Mentor channel.',{'reply':result['reply']})
+
+def youtube_download(jid,p):
+ r=media_row(p['media']);source=jget('youtube:'+r['id'])
+ if not source:raise ValueError('Proyek ini bukan tautan YouTube.')
+ import sys
+ update_job(jid,progress=10,message='Mengambil berkas video untuk ekspor; caption tetap berasal dari YouTube…')
+ dest=DATA/'jobs'/jid;dest.mkdir(exist_ok=True)
+ args=[sys.executable,'-m','yt_dlp','--no-playlist','--no-progress','--no-warnings','--socket-timeout','20','--retries','1','--max-filesize','500M','--match-filter','duration <= 7200','-f','best[height<=720][ext=mp4]/best[height<=720]','--merge-output-format','mp4','-o',str(dest/'source.%(ext)s'),source['url']]
+ try:
+  run(args,300);files=[f for f in dest.glob('source.*') if f.suffix in ('.mp4','.webm','.mkv','.mov')]
+  if not files:raise ValueError('empty')
+  f=files[0];info=probe(f)
+  if not info['width'] or info['duration']>7200 or f.stat().st_size>MAX_UPLOAD:raise ValueError('size')
+  target=DATA/'media'/(r['id']+f.suffix);shutil.move(str(f),target)
+  with db() as c:c.execute('UPDATE media SET ext=?,duration=?,width=?,height=?,audio=? WHERE id=?',(f.suffix,info['duration'],info['width'],info['height'],info['audio'],r['id']))
+  update_job(jid,'done',100,'Video siap dipotong dan diekspor dengan caption YouTube.',{'media':r['id']})
+ except Exception:
+  raise ValueError('Berkas video tidak dapat diambil dari YouTube (akses dibatasi atau batas ukuran/durasi). Caption tetap tersimpan. Unggah berkas asli lalu hubungkan ke proyek ini.') from None
+ finally:shutil.rmtree(dest,ignore_errors=True)
+
+def enqueue_unique(kind,payload):
+ with LOCK:
+  with db() as c:
+   if c.execute("SELECT 1 FROM jobs WHERE kind=? AND status IN ('queued','running')",(kind,)).fetchone():raise ValueError('Proses sejenis masih berjalan. Tunggu sampai selesai.')
+   if kind in ('coach','analyze') and c.execute("SELECT COUNT(*) FROM jobs WHERE kind IN ('coach','analyze') AND created>?",(time.time()-86400,)).fetchone()[0]>=60:raise ValueError('Batas 60 pekerjaan AI per 24 jam tercapai. Lanjutkan misi atau coba besok.')
+  return enqueue(kind,payload)
+
 def worker():
  while True:
   jid,kind,p=QUE.get()
   try:
    if kind=='transcribe':transcribe(jid,p)
    elif kind=='render':render(jid,p)
+   elif kind=='youtube':youtube_import(jid,p)
+   elif kind=='analyze':analyze_transcript(jid,p)
+   elif kind=='coach':coach_reply(jid,p)
+   elif kind=='youtube-video':youtube_download(jid,p)
   except Exception as e:
    traceback.print_exc();update_job(jid,'error',0,str(e)[:700])
   finally:QUE.task_done()
@@ -176,7 +238,7 @@ class Handler(BaseHTTPRequestHandler):
  def log_message(self,fmt,*args):print('%s %s'%(self.address_string(),fmt%args),flush=True)
  def end_headers(self):
   self.send_header('X-Content-Type-Options','nosniff');self.send_header('X-Frame-Options','DENY');self.send_header('Referrer-Policy','same-origin')
-  self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+  self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-src https://www.youtube-nocookie.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
   super().end_headers()
  def send(self,data,status=200):
   raw=json.dumps(data,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(raw)));self.end_headers();self.wfile.write(raw)
@@ -209,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
     kv={r['key']:json.loads(r['value']) for r in c.execute('SELECT * FROM kv')}
     jobs=[dict(x) for x in c.execute('SELECT * FROM jobs ORDER BY created DESC LIMIT 30')]
    import importlib.util
-   return self.send({'state':kv,'media':media,'jobs':jobs,'capabilities':{'ffmpeg':bool(shutil.which('ffmpeg')),'transcription':bool(importlib.util.find_spec('faster_whisper')),'model':os.environ.get('WHISPER_MODEL','base'),'mentor':'Aturan terstruktur + sumber resmi; tanpa model percakapan berbayar'},'mentor':assessment(kv.get('profile',{}),kv.get('metrics',[]))})
+   return self.send({'state':kv,'media':media,'jobs':jobs,'capabilities':{'ffmpeg':bool(shutil.which('ffmpeg')),'transcription':bool(importlib.util.find_spec('faster_whisper')),'model':os.environ.get('WHISPER_MODEL','base'),'mentor':'Coach AI + misi + sumber resmi',**intelligence.capabilities(DATA)},'mentor':assessment(kv.get('profile',{}),kv.get('metrics',[]))})
   if path.startswith('/api/jobs/'):
    with db() as c:r=c.execute('SELECT * FROM jobs WHERE id=?',(path.rsplit('/',1)[1],)).fetchone()
    if not r:return self.send({'error':'Proses tidak ditemukan'},404)
@@ -275,20 +337,42 @@ class Handler(BaseHTTPRequestHandler):
    self.send_response(200);self.send_header('Set-Cookie','vc_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');self.end_headers();return
   if path=='/api/upload':return self.upload()
   b=self.body()
+  if path=='/api/youtube':
+   intelligence.youtube_id(b.get('url',''))
+   if b.get('language','id') not in ('id','en'):raise ValueError('Bahasa tidak didukung.')
+   return self.send({'job':enqueue_unique('youtube',b)})
+  if path=='/api/analyze':
+   media_row(b['media']);return self.send({'job':enqueue_unique('analyze',b)})
+  if path=='/api/coach':
+   message=str(b.get('message','')).strip()
+   if not 2<=len(message)<=4000:raise ValueError('Pesan harus 2–4.000 karakter.')
+   return self.send({'job':enqueue_unique('coach',{'message':message})})
+  if path=='/api/youtube-video':
+   media_row(b['media'])
+   if not b.get('rights'):raise ValueError('Konfirmasikan hak penggunaan video terlebih dahulu.')
+   return self.send({'job':enqueue_unique('youtube-video',b)})
+  if path=='/api/attach-video':
+   source=media_row(b['source']);target=media_row(b['target'])
+   if source['id']==target['id'] or not target['width'] or target['ext']=='.youtube':raise ValueError('Pilih berkas video unggahan yang berbeda.')
+   trans=jget('transcript:'+source['id'])
+   if not trans:raise ValueError('Transkrip sumber belum tersedia.')
+   if max((x['end'] for x in trans['segments']),default=0)>target['duration']+5:raise ValueError('Video unggahan lebih pendek daripada transkrip. Gunakan berkas video penuh yang sama.')
+   jset('transcript:'+target['id'],trans);return self.send({'media':target['id']})
   if path=='/api/state':
    key=b['key']
-   if key not in ['profile','tasks','sources','calendar','metrics','monetization','researchNotes','checklist','drafts']:raise ValueError('Jenis data tidak didukung.')
-   if key in ['profile','monetization','checklist'] and not isinstance(b['value'],dict):raise ValueError('Format data tidak valid.')
+   if key not in ['profile','tasks','sources','calendar','metrics','monetization','researchNotes','checklist','drafts','coachTasks']:raise ValueError('Jenis data tidak didukung.')
+   if key in ['profile','monetization','checklist','tasks','coachTasks'] and not isinstance(b['value'],dict):raise ValueError('Format data tidak valid.')
    if key in ['sources','calendar','metrics','drafts','researchNotes'] and not isinstance(b['value'],list):raise ValueError('Format daftar tidak valid.')
    jset(key,b['value']);return self.send({'ok':True})
   if path=='/api/transcribe':
-   media_row(b['media'])
+   r=media_row(b['media'])
+   if r['ext']=='.youtube':raise ValueError('Gunakan Ambil caption YouTube. Transkripsi audio tidak dijalankan untuk tautan.')
    if b.get('language') not in ['id','en',None,'']:raise ValueError('Bahasa tidak didukung.')
    return self.send({'job':enqueue('transcribe',b)})
   if path=='/api/render':
    r=media_row(b['media']);a=safe_number(b.get('start'),0,r['duration']);z=safe_number(b.get('end'),0,r['duration'])
    if not 1<=z-a<=180:raise ValueError('Panjang klip harus 1–180 detik.')
-   if not r['width']:raise ValueError('Pilih berkas video.')
+   if not r['width'] or r['ext']=='.youtube':raise ValueError('Ambil berkas video atau unggah berkas asli sebelum ekspor MP4.')
    return self.send({'job':enqueue('render',b)})
   if path=='/api/subtitles':
    r=media_row(b['media']);segments=b.get('segments')
@@ -298,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
    for s in segments:
     a=safe_number(s['start'],0,max(r['duration'],1));z=safe_number(s['end'],0,max(r['duration'],1)+5)
     if z>a:clean.append({'start':a,'end':z,'text':str(s['text'])[:1500]})
-   result={'segments':clean,'candidates':suggestions(clean,r['duration'])};jset('transcript:'+r['id'],result);return self.send(result)
+   result={**jget('transcript:'+r['id'],{}),'segments':clean,'candidates':suggestions(clean,r['duration']),'analysis':None};jset('transcript:'+r['id'],result);return self.send(result)
   if path=='/api/password':
    cred=json.loads((DATA/'credentials.json').read_text());test=hashlib.pbkdf2_hmac('sha256',str(b.get('current','')).encode(),cred['salt'].encode(),250000).hex()
    if not hmac.compare_digest(test,cred['hash']):raise ValueError('Kata sandi saat ini salah.')
@@ -312,7 +396,7 @@ class Handler(BaseHTTPRequestHandler):
    r=media_row(b['id'])
    with db() as c:
     if c.execute("SELECT 1 FROM jobs WHERE status IN ('running','queued')").fetchone():raise ValueError('Tunggu semua proses selesai sebelum menghapus media.')
-    c.execute('DELETE FROM media WHERE id=?',(r['id'],));c.execute('DELETE FROM kv WHERE key=?',('transcript:'+r['id'],))
+    c.execute('DELETE FROM media WHERE id=?',(r['id'],));c.execute('DELETE FROM kv WHERE key IN (?,?)',('transcript:'+r['id'],'youtube:'+r['id']))
    media_path(r).unlink(missing_ok=True);return self.send({'ok':True})
   return self.send({'error':'Tidak ditemukan.'},404)
  def upload(self):

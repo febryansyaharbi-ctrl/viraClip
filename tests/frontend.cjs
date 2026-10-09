@@ -14,3 +14,8 @@ for(const populated of [false,true]){
 assert.equal(vm.runInContext("safeLink('javascript:alert(1)','bad')",ctx),'');
 assert.equal(vm.runInContext("median([1,9,3,4])",ctx),3.5);
 console.log('PASS: 20 page renders, hostile text and URL escaping, median calculation. Browser layout still requires visual verification.');
+vm.runInContext(`data.state['youtube:'+selected]={video_id:'jNQXAC9IVRw',url:'https://www.youtube.com/watch?v=jNQXAC9IVRw'};data.media[0].ext='.youtube';data.state['transcript:'+selected]={source:'youtube',language:'en',segments:[{start:10,end:13,text:'test'}],candidates:[{start:10,end:30,title:'<img onerror=bad>',reason:'good',method:'ai'}]};`,ctx);
+for(const tab of ['edit','subtitles','candidates']){vm.runInContext(`subtab='${tab}'`,ctx);const html=vm.runInContext('studio()',ctx);assert.ok(html.includes('youtube-nocookie.com/embed/'));assert.ok(!html.includes('<img onerror=bad>'));}
+assert.equal(vm.runInContext(`subtitleFile([{start:10,end:13,text:'hello'}],11,12)`,ctx),'1\n00:00:00,000 --> 00:00:01,000\nhello\n');
+vm.runInContext(`data.state.coachHistory=[{role:'assistant',text:'<script>bad</script>',meta:{provider:'Test'}}];data.state.coachMissions=[{id:'m1',title:'Test',detail:'Do this',minutes:20}];`,ctx);assert.ok(!vm.runInContext('mentor()',ctx).includes('<script>bad</script>'));
+console.log('PASS: YouTube tabs, SRT clipping offsets, AI reply escaping.');
